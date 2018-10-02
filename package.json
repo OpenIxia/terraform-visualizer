@@ -1,0 +1,106 @@
+{
+    "name": "terraform-visualizer",
+    "displayName": "Terraform Visualizer",
+    "description": "VSCode extension for visually previewing Terraform configuration files",
+    "version": "0.1.0",
+    "private": true,
+    "publisher": "samlee0631",
+    "engines": {
+        "vscode": "^1.25.0"
+    },
+    "os": [
+        "darwin"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/openixia/terraform-visualizer"
+    },
+    "bugs": {
+        "url": "https://github.com/openixia/terraform-visualizer/issues"
+    },
+    "homepage": "https://github.com/openixia/terraform-visualizer/blob/master/README.md",
+    "categories": [
+        "Programming Languages",
+        "Other"
+    ],
+    "keywords": [
+        "terraform",
+        "graph",
+        "visual",
+        "visualize"
+    ],
+    "activationEvents": [
+        "onLanguage:terraform"
+    ],
+    "main": "./out/src/extension",
+    "contributes": {
+        "configuration": {
+            "type": "object",
+            "title": "Terraform Visualizer Configuration",
+            "properties": {}
+        },
+        "commands": [
+            {
+                "command": "terraform.visualize",
+                "title": "Visualize"
+            }
+        ],
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "terraform.visualize",
+                    "when": "editorLangId == terraform",
+                    "group": "navigation"
+                }
+            ],
+            "commandPalette": [
+                {
+                    "command": "terraform.visualize",
+                    "when": "editorLangId == terraform"
+                }
+            ]
+        },
+        "keybindings": [
+            {
+                "command": "terraform.visualize",
+                "key": "alt+m",
+                "when": "editorLangId == terraform"
+            }
+        ],
+        "languages": [
+            {
+                "id": "terraform",
+                "aliases": [
+                    "Terraform",
+                    "terraform"
+                ],
+                "extensions": [
+                    ".tf",
+                    ".tfvars",
+                    ".hcl"
+                ]
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "postinstall": "node ./node_modules/vscode/bin/install",
+        "test": "npm run compile && node ./node_modules/vscode/bin/test"
+    },
+    "dependencies": {
+        "cytoscape": "^3.2.17",
+        "fs-extra": "^7.0.0",
+        "syscall": "file:./node-syscall",
+        "vscode": "^1.1.21"
+    },
+    "devDependencies": {
+        "@types/fs-extra": "^5.0.4",
+        "@types/mocha": "^5.2.5",
+        "@types/node": "^10.11.2",
+        "gulp": "^3.9.1",
+        "node-gyp": "^3.8.0",
+        "typescript": "^3.1.1"
+    }
+}

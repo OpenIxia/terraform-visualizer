@@ -1,0 +1,17 @@
+{
+  "name": "syscall",
+  "description": "syscall native module for gopherjs use https://github.com/gopherjs/gopherjs/blob/master/doc/syscalls.md",
+  "author": "Sam Lee <sam-j.lee@keysight.com>",
+  "version": "0.0.1",
+  "main": "./build/Release/syscall",
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=10"
+  },
+  "dependencies": {},
+  "scripts": {
+    "install": "HOME=~/.electron-gyp node-gyp rebuild --target=2.0.5 --arch=x64 --dist-url=https://atom.io/download/electron"
+  }
+}
