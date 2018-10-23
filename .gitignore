@@ -1,6 +1,7 @@
 .DS_Store
 node_modules/
+out/
 */out/
 */.tv
 *.vsix
-out/
+hcl-hil/vendor/*/

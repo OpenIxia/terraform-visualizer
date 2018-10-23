@@ -7,5 +7,6 @@
         "out": true // set this to false to include "out" folder in search results
     },
     "debug.node.autoAttach": "on",
-    "python.pythonPath": "/Users/samlee01/.local/share/virtualenvs/cloudmapper-RADw4Qwt/bin/python"
+    "python.pythonPath": "/Users/samlee01/.local/share/virtualenvs/cloudmapper-RADw4Qwt/bin/python",
+    "git.ignoreLimitWarning": true
 }

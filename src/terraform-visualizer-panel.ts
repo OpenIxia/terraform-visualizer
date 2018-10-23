@@ -6,9 +6,53 @@ import { PreviewKind } from './core';
 import { outputFileSync } from 'fs-extra';
 const hcl = require('./hcl-hil.js');
 
-export default class OpenLayersDocumentContentProvider extends PreviewDocumentContentProvider {
-    constructor() {
+export default class TerraformVisualizerPanel extends PreviewDocumentContentProvider {
+    /**
+     * Tracke the current panel.  Only allow a single panel to exist at a time.
+     */
+    public static currentPanel: TerraformVisualizerPanel | undefined;
+    private _panel: vscode.WebviewPanel | undefined;
+    private _column: vscode.ViewColumn;
+    private readonly _extensionPath: string;
+    private readonly _workspaceRoot: string | undefined;
+    private readonly _onDiskPath: vscode.Uri;
+    private readonly _localSourceUri: any;
+    private _disposables: vscode.Disposable[] = [];
+
+    constructor(extensionPath: string, column: vscode.ViewColumn) {
         super();
+
+        this._workspaceRoot = extensionPath;
+        this._extensionPath = extensionPath;
+        this._column = column;
+        this._onDiskPath = vscode.Uri.file(path.join(this._extensionPath, 'web'));
+        this._localSourceUri = this._onDiskPath.with({ scheme: 'vscode-resource' });
+
+
+
+        if (vscode.workspace.workspaceFolders != undefined) {
+            this._workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath
+        }
+    }
+
+    public dispose() {
+        TerraformVisualizerPanel.currentPanel = undefined;
+
+        // Clean up our resources
+        if (this._panel)
+            this._panel.dispose();
+
+        while (this._disposables.length) {
+            const x = this._disposables.pop();
+            if (x) {
+                x.dispose();
+            }
+        }
+    }
+
+    private _update() {
+        if (this._panel)
+            this._panel.webview.html = this._getHtml();
     }
 
     protected getPreviewKind(): PreviewKind {
@@ -28,45 +72,99 @@ export default class OpenLayersDocumentContentProvider extends PreviewDocumentCo
         return ''
     }
 
-    public drawDiagram(extensionPath: string) {
+    public drawDiagram(extensionPath: string): string {
 
         if (vscode.workspace.workspaceFolders == undefined) {
             return "";
         }
-        const workspaceRootUri = vscode.workspace.workspaceFolders[0].uri;
-        const workspaceRoot = workspaceRootUri.fsPath
 
-        const onDiskPath = vscode.Uri.file(path.join(extensionPath, 'web'));
-        const localSourceUri = onDiskPath.with({ scheme: 'vscode-resource' });
 
-        var data, error;
-        [data, error] = hcl.dirToCytoscape(workspaceRoot);
+        // If we already have a panel, show it.
+        // Otherwise create a new panel
+        if (TerraformVisualizerPanel.currentPanel && TerraformVisualizerPanel.currentPanel._panel) {
 
-        if (error) {
-            console.log("ERROR:", error);
+            TerraformVisualizerPanel.currentPanel._panel.reveal(this._column);
+
         } else {
+            TerraformVisualizerPanel.currentPanel = this;
+            this._panel = vscode.window.createWebviewPanel("AutoDiagram", "Terraform Visualizer", this._column, {
+                // Enable javascript in the webview
+                enableScripts: true,
+                retainContextWhenHidden: true,
 
-            console.log("cytoscape_data:", data);
-            outputFileSync(onDiskPath.fsPath + "/.tv/data.json", data);
+                // And restric the webview to only loading content from our extension's `media` directory.
+                localResourceRoots: [
+                    vscode.Uri.file(path.join(this._extensionPath, 'web'))
+                ]
+            });
+
+            // Set the webview's initial html content
+            this._update();
+
+
+            // Update the content based on view changes
+            this._panel.onDidChangeViewState(e => {
+                if (this._panel)
+                    if (this._panel.viewColumn)
+                        this._column = this._panel.viewColumn
+            }, null, this._disposables);
+
+            // Listen for when the panel is disposed
+            // This happens when the user closes the panel or when the panel is closed programatically
+            this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
+
+            // Handle messages from the webview
+            this._panel.webview.onDidReceiveMessage(message => {
+                switch (message.command) {
+                    case 'alert':
+                        vscode.window.showErrorMessage(message.text);
+                        return;
+                }
+            }, null, this._disposables);
         }
+
+
+
+        return ""
+    }
+
+    private _getHtml() {
+
+        const nonce = this.getNonce();
+        var data;
+        try {
+            data = hcl.dirToCytoscape(this._workspaceRoot);
+        } catch (e) {
+            console.log("ERROR:", e);
+            return "";
+        }
+
+        console.log("cytoscape_data:", data);
+        outputFileSync(this._onDiskPath.fsPath + "/.tv/data.json", data);
+
 
         return `
                                 <!DOCTYPE html>
                                 <meta charset="utf-8">  
                                 <html>
                                 <head>
+                                    <!--
+                                    Use a content security policy to only allow loading images from https or from our extension directory,
+                                    and only allow scripts that have a specific nonce.
+                                    -->
+                                    
                                     <base>
                                     <title>Ixia Terraform Visualizer</title>
-                                    <script src="${localSourceUri}/js/nprogress.js"></script>
-                                    <link href="${localSourceUri}/css/nprogress.css" rel="stylesheet" type="text/css" />           
-                                    <link href="${localSourceUri}/css/jquery.qtip.css" rel="stylesheet" type="text/css" />
-                                    <link href="${localSourceUri}/css/cytoscape.js-panzoom.css" rel="stylesheet" type="text/css" />
-                                    <link href="${localSourceUri}/css/font-awesome-4.7.0/css/font-awesome.css" rel="stylesheet" type="text/css" />                              
-                                    <link href="${localSourceUri}/css/cytoscape.js-navigator.css" rel="stylesheet" type="text/css" />
-                                    <link href="${localSourceUri}/css/akkordion.css" rel="stylesheet" type="text/css" />       
-                                    <link href="${localSourceUri}/css/cloudmap.css" rel="stylesheet" type="text/css" />
+                                    <script nonce="${nonce}" src="${this._localSourceUri}/js/nprogress.js"></script>
+                                    <link href="${this._localSourceUri}/css/nprogress.css" rel="stylesheet" type="text/css" />           
+                                    <link href="${this._localSourceUri}/css/jquery.qtip.css" rel="stylesheet" type="text/css" />
+                                    <link href="${this._localSourceUri}/css/cytoscape.js-panzoom.css" rel="stylesheet" type="text/css" />
+                                    <link href="${this._localSourceUri}/css/font-awesome-4.7.0/css/font-awesome.css" rel="stylesheet" type="text/css" />                              
+                                    <link href="${this._localSourceUri}/css/cytoscape.js-navigator.css" rel="stylesheet" type="text/css" />
+                                    <link href="${this._localSourceUri}/css/akkordion.css" rel="stylesheet" type="text/css" />       
+                                    <link href="${this._localSourceUri}/css/cloudmap.css" rel="stylesheet" type="text/css" />
                                 
-                                    <link rel="shortcut icon" type="image/x-icon" href="${localSourceUri}/favicon.ico" />
+                                    <link rel="shortcut icon" type="image/x-icon" href="${this._localSourceUri}/favicon.ico" />
                                 </head>
                                 
                                 <body>
@@ -116,25 +214,25 @@ export default class OpenLayersDocumentContentProvider extends PreviewDocumentCo
                             </div>
                         
                             <div id="cy"></div>
-                            <script src="${localSourceUri}/js/cytoscape.min.js"></script>
-                            <script src="${localSourceUri}/js/jquery.min.js"></script>
-                            <script src="${localSourceUri}/js/jquery.qtip.js"></script>
-                            <script src="${localSourceUri}/js/cytoscape-cose-bilkent.js"></script>
-                            <script src="${localSourceUri}/js/cytoscape-grid-guide.js"></script>
-                            <script src="${localSourceUri}/js/cytoscape-qtip.js"></script>                       
-                            <script src="${localSourceUri}/js/cytoscape-panzoom.js"></script>
-                            <script src="${localSourceUri}/js/cytoscape-undo-redo.js"></script>
-                            <script src="${localSourceUri}/js/cytoscape-view-utilities.js"></script>
-                            <script src="${localSourceUri}/js/cytoscape-expand-collapse.js"></script>
-                            <script src="${localSourceUri}/js/cytoscape-navigator.js"></script>
-                            <script src="${localSourceUri}/js/cytoscape-autopan-on-drag.js"></script>                        
-                            <script src="${localSourceUri}/js/FileSaver.min.js"></script>
-                            <script src="${localSourceUri}/js/circular-json.js"></script>
-                            <script src="${localSourceUri}/js/mousetrap.min.js"></script>
-                            <script src="${localSourceUri}/js/akkordion.min.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape.min.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/jquery.min.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/jquery.qtip.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape-cose-bilkent.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape-grid-guide.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape-qtip.js"></script>                       
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape-panzoom.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape-undo-redo.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape-view-utilities.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape-expand-collapse.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape-navigator.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cytoscape-autopan-on-drag.js"></script>                        
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/FileSaver.min.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/circular-json.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/mousetrap.min.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/akkordion.min.js"></script>
                         
-                            <script src="${localSourceUri}/js/nodeInfo.js"></script>
-                            <script src="${localSourceUri}/js/cloudmap.js"></script>                            
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/nodeInfo.js"></script>
+                            <script nonce="${nonce}" src="${this._localSourceUri}/js/cloudmap.js"></script>                            
                                     <script type="text/javascript">
 
                                                function setError(e) {
@@ -151,10 +249,10 @@ export default class OpenLayersDocumentContentProvider extends PreviewDocumentCo
                                                        akkordion(".akkordion", {});
                                                        
                                                        $.when(
-                                                           $.getJSON("${localSourceUri}/.tv/data.json"),
-                                                           $.getJSON("${localSourceUri}/style.json")
+                                                           $.getJSON("${this._localSourceUri}/.tv/data.json"),
+                                                           $.getJSON("${this._localSourceUri}/style.json")
                                                        ).done(function(datafile, stylefile) {
-                                                           var sFile = JSON.parse(JSON.stringify(stylefile[0]).replace("\${localSourceUri}", "${localSourceUri}"))
+                                                           var sFile = JSON.parse(JSON.stringify(stylefile[0]).replace("\${localSourceUri}", "${this._localSourceUri}"))
                                                            NProgress.set(0.5);
 
                                                            loadCytoscape({
@@ -177,6 +275,13 @@ export default class OpenLayersDocumentContentProvider extends PreviewDocumentCo
                                            </script>
                                     </body>
                                 </html>`
-
+    }
+    private getNonce() {
+        let text = "";
+        const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        for (let i = 0; i < 32; i++) {
+            text += possible.charAt(Math.floor(Math.random() * possible.length));
+        }
+        return text;
     }
 }

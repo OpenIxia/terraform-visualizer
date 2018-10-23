@@ -47,7 +47,7 @@
         }
     },
     {
-        "selector": "[type = \"vpc\"]",
+        "selector": "[type = \"aws_vpc\"]",
         "css": {
             "border-color": "#6b788c",
             "border-style": "dotted",
@@ -64,7 +64,7 @@
         }
     },
     {
-        "selector": "[type = \"subnet\"]",
+        "selector": "[type = \"aws_subnet\"]",
         "css": {
             "border-color": "#ff5959",
             "border-style": "dashed",
@@ -73,7 +73,7 @@
         }
     },
     {
-        "selector": "[type = \"ec2\"]",
+        "selector": "[type = \"aws_instance\"]",
         "css": {
             "background-opacity": 0,
             "background-image": "${localSourceUri}/icons/aws/Compute/Compute_AmazonEC2.svg",
