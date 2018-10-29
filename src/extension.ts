@@ -13,7 +13,7 @@ export function activate(context: vscode.ExtensionContext) {
     const mapPreviewCommand = vscode.commands.registerCommand(extension.TERRAFORM_COMMAND_ID, () => {
 
 
-        tfVisualizer.drawDiagram(context.extensionPath);
+        tfVisualizer.drawDiagram();
     });
 
     context.subscriptions.push(mapPreviewCommand, tfRegistration);

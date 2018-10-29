@@ -100,7 +100,7 @@
         }
     },
     {
-        "selector": "[type = \"elb\"]",
+        "selector": "[type = \"aws_elb\"]",
         "css": {
             "background-opacity": 0,
             "background-image": "${localSourceUri}/icons/aws/Compute/Compute_ElasticLoadBalancing.svg",

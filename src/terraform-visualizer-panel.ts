@@ -50,11 +50,6 @@ export default class TerraformVisualizerPanel extends PreviewDocumentContentProv
         }
     }
 
-    private _update() {
-        if (this._panel)
-            this._panel.webview.html = this._getHtml();
-    }
-
     protected getPreviewKind(): PreviewKind {
         return "directory";
     }
@@ -72,7 +67,7 @@ export default class TerraformVisualizerPanel extends PreviewDocumentContentProv
         return ''
     }
 
-    public drawDiagram(extensionPath: string): string {
+    public drawDiagram(): string {
 
         if (vscode.workspace.workspaceFolders == undefined) {
             return "";
@@ -86,6 +81,12 @@ export default class TerraformVisualizerPanel extends PreviewDocumentContentProv
             TerraformVisualizerPanel.currentPanel._panel.reveal(this._column);
 
         } else {
+            var htmlContent = "";
+            try {
+                htmlContent = this._getHtml();
+            } catch (e) {
+                return "";
+            }
             TerraformVisualizerPanel.currentPanel = this;
             this._panel = vscode.window.createWebviewPanel("AutoDiagram", "Terraform Visualizer", this._column, {
                 // Enable javascript in the webview
@@ -98,9 +99,7 @@ export default class TerraformVisualizerPanel extends PreviewDocumentContentProv
                 ]
             });
 
-            // Set the webview's initial html content
-            this._update();
-
+            this._panel.webview.html = htmlContent;
 
             // Update the content based on view changes
             this._panel.onDidChangeViewState(e => {
@@ -125,6 +124,8 @@ export default class TerraformVisualizerPanel extends PreviewDocumentContentProv
 
 
 
+        if (this._panel)
+            return this._panel.webview.html
         return ""
     }
 
@@ -135,8 +136,9 @@ export default class TerraformVisualizerPanel extends PreviewDocumentContentProv
         try {
             data = hcl.dirToCytoscape(this._workspaceRoot);
         } catch (e) {
-            console.log("ERROR:", e);
-            return "";
+            console.log(e);
+            vscode.window.showErrorMessage(e + '');
+            throw new Error(e);
         }
 
         console.log("cytoscape_data:", data);

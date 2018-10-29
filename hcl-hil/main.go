@@ -22,7 +22,9 @@ import (
 	"github.com/hashicorp/terraform/config/module"
 	"github.com/hashicorp/terraform/dag"
 	"github.com/hashicorp/terraform/flatmap"
+	"github.com/hashicorp/terraform/helper/logging"
 	"github.com/hashicorp/terraform/terraform"
+	"github.com/terraform-providers/terraform-provider-aws/aws"
 )
 
 type hclError struct {
@@ -473,6 +475,9 @@ func testProvider(prefix string) *terraform.MockResourceProvider {
 		terraform.ResourceType{
 			Name: fmt.Sprintf("%s_instance", prefix),
 		},
+		terraform.ResourceType{
+			Name: fmt.Sprintf("%s_vpc", prefix),
+		},
 	}
 
 	return p
@@ -711,8 +716,8 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 		s *terraform.InstanceState,
 		c *terraform.ResourceConfig) (*terraform.InstanceDiff, error) {
 
-		diff := new(terraform.InstanceDiff)
-		diff.Attributes = make(map[string]*terraform.ResourceAttrDiff)
+		//		diff := new(terraform.InstanceDiff)
+		//		diff.Attributes = make(map[string]*terraform.ResourceAttrDiff)
 
 		switch info.Type {
 		case "aws_vpc":
@@ -722,13 +727,13 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			if p, ok := c.Get("vpc_id"); ok {
 				// add parent
 				if err := thisGraph.addNode2(info, c, p.(string)); err != nil {
-					return diff, err
+					return nil, err
 				}
 			}
 			if p, ok := c.Get("cidr_block"); ok {
 				cidr := strip(p.(string))
 				if err := thisGraph.addSubCidrMap(info.HumanId(), cidr); err != nil {
-					return diff, err
+					return nil, err
 				}
 			}
 
@@ -739,7 +744,7 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			if p, ok := c.Get("subnet_id"); ok {
 				subnet = strip(p.(string))
 				if err := thisGraph.addNode2(info, c, subnet); err != nil {
-					return diff, err
+					return nil, err
 				}
 				if _sgs, ok := c.Get("vpc_security_group_ids"); ok {
 					for _, sg := range _sgs.([]interface{}) {
@@ -755,10 +760,10 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 							if nid, ok := ni["network_interface_id"]; ok {
 								netID := strip(nid.(string))
 								if err := thisGraph.addNode2(info, c, thisGraph.ParentMap[netID]); err != nil {
-									return diff, err
+									return nil, err
 								}
 								if err := thisGraph.addNiEc2Map2(nid.(string), info.HumanId()); err != nil {
-									return diff, err
+									return nil, err
 								}
 								// draw network connections
 								sgs = thisGraph.NiSgMembership[netID]
@@ -790,7 +795,7 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			//Look for any cidr block sg rules that apply this the current instance
 			currentCidr, ok := thisGraph.SubCidrMap[subnet]
 			if !ok {
-				return diff, errors.New("Unexpected error: couldn't match a subnet to its cidr block")
+				return nil, errors.New("Unexpected error: couldn't match a subnet to its cidr block")
 			}
 			ip, cCidr, err := net.ParseCIDR(currentCidr)
 			if err != nil {
@@ -843,20 +848,20 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			if p, ok := c.Get("subnet_id"); ok {
 				err := thisGraph.addParent2(info, p.(string))
 				if err != nil {
-					return diff, err
+					return nil, err
 				}
 				err = thisGraph.addSubNiMembership2(p.(string), info.HumanId())
 				if err != nil {
-					return diff, err
+					return nil, err
 				}
 			}
 			if sgs, ok := c.Get("security_groups"); ok {
 				for _, sg := range sgs.([]interface{}) {
 					if err := thisGraph.addSgNiMembership2(sg.(string), info.HumanId()); err != nil {
-						return diff, err
+						return nil, err
 					}
 					if err := thisGraph.addNiSgMembership2(info.HumanId(), sg.(string)); err != nil {
-						return diff, err
+						return nil, err
 					}
 				}
 			}
@@ -876,10 +881,10 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			}
 			var tmpG dag.Graph
 			if err := evalSG(info, c, &g, true, &tmpG); err != nil {
-				return diff, err
+				return nil, err
 			}
 			if err := evalSG(info, c, &g, false, &tmpG); err != nil {
-				return diff, err
+				return nil, err
 			}
 			// at this point (A) g.DownEdges(info.HumanId()) should match with (B) tmpG.DownEdges(info.HumanId())
 			// any differences in A should be pruned such that A is subset of B
@@ -930,43 +935,52 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			println("sjl8")
 		}
 
-		for k, v := range c.Raw {
+		//		for k, v := range c.Raw {
+		//
+		//			if k == "nil" {
+		//				return nil, nil
+		//			}
+		//
+		//			// If this key is not computed, then look it up in the
+		//			// cleaned config.
+		//			found := false
+		//			for _, ck := range c.ComputedKeys {
+		//				if ck == k {
+		//					found = true
+		//					break
+		//				}
+		//			}
+		//			if !found {
+		//				v = c.Config[k]
+		//			}
 
-			if k == "nil" {
-				return nil, nil
-			}
-
-			// If this key is not computed, then look it up in the
-			// cleaned config.
-			found := false
-			for _, ck := range c.ComputedKeys {
-				if ck == k {
-					found = true
-					break
-				}
-			}
-			if !found {
-				v = c.Config[k]
-			}
-
-			for k, attrDiff := range testFlatAttrDiffs(k, v) {
-
-				diff.Attributes[k] = attrDiff
-			}
-
-		}
+		//			for k, attrDiff := range testFlatAttrDiffs(k, v) {
+		//
+		//				diff.Attributes[k] = attrDiff
+		//			}
+		//
+		//		}
 		println("sgGrph=" + g.String())
 
-		if !diff.Empty() {
-			diff.Attributes["type"] = &terraform.ResourceAttrDiff{
-				Old: "",
-				New: info.Type,
-			}
+		//		if !diff.Empty() {
+		//			diff.Attributes["type"] = &terraform.ResourceAttrDiff{
+		//				Old: "",
+		//				New: info.Type,
+		//			}
+		//		}
+
+		// Add computed fields from the actual aws provider
+
+		p := aws.Provider()
+		diff, err := p.Diff(info, s, c)
+		if err != nil {
+			return nil, err
 		}
 
 		return diff, nil
 	}
 
+	input := new(terraform.MockUIInput)
 	ctx, err := mockContext(&terraform.ContextOpts{
 		Module: m,
 		ProviderResolver: terraform.ResourceProviderResolverFixed(
@@ -975,11 +989,19 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			},
 		),
 		Parallelism: 1,
+		UIInput:     input,
 	})
-
 	if err != nil {
 		return err
 	}
+	input.InputFn = func(opts *terraform.InputOpts) (string, error) {
+		return "", fmt.Errorf("Try setting a default value")
+	}
+
+	if err := ctx.Input(terraform.InputModeVar | terraform.InputModeVarUnset); err != nil {
+		return err
+	}
+	logging.SetOutput() // suppress verbose logging that shows up in Developer Tool console screen
 
 	if _, err := ctx.Plan(); err != nil {
 		return err

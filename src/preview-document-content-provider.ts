@@ -60,7 +60,7 @@ export abstract class PreviewDocumentContentProvider implements vscode.TextDocum
     private generateDocumentContent(uri: vscode.Uri): string {
         const doc = this.resolveDocument(uri);
         if (doc) {
-            const content = this.drawDiagram("");
+            const content = this.drawDiagram();
             const debugSettings = vscode.workspace.getConfiguration("terraform.visualize.debug");
             if (debugSettings.has("tbd")) {
                 const doSomething = debugSettings.get("tbd");
@@ -144,5 +144,5 @@ export abstract class PreviewDocumentContentProvider implements vscode.TextDocum
         return text;
     }
 
-    public abstract drawDiagram(extensionPath: string): string;
+    public abstract drawDiagram(): string;
 }

@@ -1,5 +1,6 @@
 var gulp = require('gulp');
 var mkdirp = require('mkdirp');
+var rename = require('gulp-rename')
 
 var spawn = require('child_process').spawn;
 var fs = require('fs');
@@ -78,22 +79,12 @@ gulp.task('generate-closure-container', ['generate-transpiled.js'], (done) => {
     });
 });
 
-gulp.task('generate-hcl-hil.js', ['create-output-directory', 'generate-closure-container'], (done) => {
-    var docker = spawn('docker', [
-        'run',
-        '--rm', 'gopher-hcl-closure-compiler'
-    ], { stdio: ['ignore', 'pipe', 'inherit'] });
+gulp.task('generate-hcl-hil.js', ['create-output-directory'], (done) => {
 
-    var stream = fs.createWriteStream('out/src/hcl-hil.js', { flags: 'w+' });
+    gulp.src('hcl-hil/transpiled.js')
+        .pipe(rename('hcl-hil.js'))
+        .pipe(gulp.dest('out/src'))
 
-    docker.stdout.pipe(stream);
-    docker.on('close', (code) => {
-        if (code !== 0) {
-            done(new Error(`docker run gopher-hcl-gopherjs failed with code ${code}`));
-        } else {
-            done();
-        }
-    });
 });
 
 //
