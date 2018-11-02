@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/gopherjs/gopherjs/js"
 	"github.com/hashicorp/hcl"
@@ -22,10 +23,26 @@ import (
 	"github.com/hashicorp/terraform/config/module"
 	"github.com/hashicorp/terraform/dag"
 	"github.com/hashicorp/terraform/flatmap"
-	"github.com/hashicorp/terraform/helper/logging"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/terraform-providers/terraform-provider-aws/aws"
 )
+
+// wrapper struct for terraform.InstanceInfo so we can do some customized behavior
+type cytoInstanceInfo struct {
+	II *terraform.InstanceInfo
+	ID string
+}
+
+func newInstanceInfo(ii *terraform.InstanceInfo, index int) *cytoInstanceInfo {
+	p := new(cytoInstanceInfo)
+	if index == 0 {
+		p.ID = ii.HumanId()
+	} else {
+		p.ID = ii.HumanId() + strconv.Itoa(index)
+	}
+	p.II = ii
+	return p
+}
 
 type hclError struct {
 	Pos *hclToken.Pos
@@ -153,11 +170,7 @@ func strip(id string) (out string) {
 	println("interpolating: " + id)
 	if isInterpolated(id) {
 		out = id[2 : len(id)-1]
-
-		// in case the id comes in as "foo.bar.*.id[count.index]" we want "foo.bar"
-		if rv, err := config.NewResourceVariable(out); err == nil {
-			out = rv.Type + "." + rv.Name
-		}
+		out = strings.TrimSuffix(out, ".id")
 	} else {
 		out = id
 	}
@@ -303,6 +316,21 @@ func NewEndPointGroup(id string) *EndPointGroup {
 	}
 }
 
+// prepend name with each modulePath entry.  E.g. - if modulePath = {"root", "base", "sub"} and name = "foo", then return "module.base.sub.foo"
+func modulePath(modulePath []string, name string) string {
+	if len(modulePath) <= 1 {
+		return name
+	}
+	if strings.HasPrefix(name, "module") {
+		return name
+	}
+
+	return fmt.Sprintf(
+		"module.%s.%s",
+		strings.Join(modulePath[1:], "."),
+		name)
+}
+
 type graph struct {
 	CytoscapeData        *[]cytoscapeNode
 	ParentMap            map[string]string
@@ -321,11 +349,8 @@ type graph struct {
 	SubEc2Membership     map[string][]string
 }
 
-func (g graph) addParent(res *config.Resource, parent string) error {
-	return mapIt(res, g.ParentMap, res.Id(), parent, true, false)
-}
-func (g graph) addParent2(info *terraform.InstanceInfo, parent string) error {
-	return mapIt2(g.ParentMap, info.HumanId(), parent)
+func (g graph) addParent(info *cytoInstanceInfo, parent string) error {
+	return mapIt2(g.ParentMap, info.ID, parent)
 }
 func (g graph) addSubNiMembership(ni *config.Resource, subID string, netID string) error {
 	return mapMembership(ni, g.SubNIMembership, subID, netID, false)
@@ -381,34 +406,12 @@ func (g graph) addCidrEc2Membership(cidr string, ec2ID string) error {
 func (g graph) addSubEc2Membership(sub string, ec2ID string) error {
 	return mapMembership2(g.SubEc2Membership, sub, ec2ID)
 }
-func (g graph) addNode(res *config.Resource, nType string, nParent string) error {
-	count, err := res.Count()
-	if err != nil {
-		return err
-	}
-	for i := 0; i < count; i++ {
-		index := strconv.Itoa(i)
-		node := cytoscapeNode{
-			Data: cytoscapeNodeBody{
-				ID:       res.Id() + "." + index,
-				Name:     res.Name,
-				NodeType: nType,
-				Parent:   nParent,
-			},
-		}
-		println("add node: " + node.Data.ID + " " + node.Data.Name)
-		*g.CytoscapeData = append(*g.CytoscapeData, node)
-		l := strconv.Itoa(len(*g.CytoscapeData))
-		println("length of cytodata=" + l)
-	}
-	return nil
-}
-func (g graph) addNode2(info *terraform.InstanceInfo, c *terraform.ResourceConfig, nParent string) error {
+func (g graph) addNode(info *cytoInstanceInfo, c *terraform.ResourceConfig, nParent string, index int) error {
 
 	parent := strip(nParent)
 
 	nodeData := make(map[string]interface{})
-	switch info.Type {
+	switch info.II.Type {
 	case "aws_subnet":
 		if cidr, ok := c.Get("cidr_block"); ok {
 			nodeData["CidrBlock"] = cidr
@@ -417,16 +420,16 @@ func (g graph) addNode2(info *terraform.InstanceInfo, c *terraform.ResourceConfi
 
 	node := cytoscapeNode{
 		Data: cytoscapeNodeBody{
-			ID:       info.HumanId(),
-			Name:     info.HumanId(),
-			NodeType: info.Type,
+			ID:       info.ID,
+			Name:     info.II.HumanId(),
+			NodeType: info.II.Type,
 			NodeData: nodeData,
 			Parent:   parent,
 		},
 	}
 	println("add node: " + node.Data.ID + " parent=" + node.Data.Parent)
 	*g.CytoscapeData = append(*g.CytoscapeData, node)
-	if err := g.addParent2(info, parent); err != nil {
+	if err := g.addParent(info, parent); err != nil {
 		return err
 	}
 
@@ -477,6 +480,9 @@ func testProvider(prefix string) *terraform.MockResourceProvider {
 		},
 		terraform.ResourceType{
 			Name: fmt.Sprintf("%s_vpc", prefix),
+		},
+		terraform.ResourceType{
+			Name: fmt.Sprintf("%s_resource", prefix),
 		},
 	}
 
@@ -581,7 +587,7 @@ func testFlatAttrDiffs(k string, i interface{}) map[string]*terraform.ResourceAt
 	return diffs
 }
 
-func evalSG(info *terraform.InstanceInfo, c *terraform.ResourceConfig, g *dag.Graph, bIngress bool, tmpG *dag.Graph) error {
+func evalSG(info *cytoInstanceInfo, c *terraform.ResourceConfig, g *dag.Graph, bIngress bool, tmpG *dag.Graph) error {
 	direction := "ingress"
 	if !bIngress {
 		direction = "egress"
@@ -605,11 +611,11 @@ func evalSG(info *terraform.InstanceInfo, c *terraform.ResourceConfig, g *dag.Gr
 					g.Add(CIDR.String())
 
 					if bIngress {
-						println("connecting " + CIDR.String() + " -> " + info.HumanId())
-						tmpG.Connect(dag.BasicEdge(CIDR.String(), info.HumanId()))
+						println("connecting " + CIDR.String() + " -> " + info.ID)
+						tmpG.Connect(dag.BasicEdge(CIDR.String(), info.ID))
 					} else {
-						println("connecting " + info.HumanId() + " -> " + CIDR.String())
-						tmpG.Connect(dag.BasicEdge(info.HumanId(), CIDR.String()))
+						println("connecting " + info.ID + " -> " + CIDR.String())
+						tmpG.Connect(dag.BasicEdge(info.ID, CIDR.String()))
 					}
 					for _, e := range tmpG.Edges() {
 						println("check0: " + e.Source().(string) + " -> " + e.Target().(string))
@@ -619,17 +625,17 @@ func evalSG(info *terraform.InstanceInfo, c *terraform.ResourceConfig, g *dag.Gr
 					if CIDR.String() == "0.0.0.0/0" {
 						// for all the security groups and cidrs processed so far, add an edge to this security group
 						for _, v := range g.Vertices() {
-							e := dag.BasicEdge(v.(string), info.HumanId())
+							e := dag.BasicEdge(v.(string), info.ID)
 							if !bIngress {
-								e = dag.BasicEdge(info.HumanId(), v.(string))
+								e = dag.BasicEdge(info.ID, v.(string))
 							}
 
 							if g.HasVertex(v) {
 								if g.HasEdge(e) {
 									if bIngress {
-										println("ingress:tmpG.Connect " + v.(string) + " -> " + info.HumanId())
+										println("ingress:tmpG.Connect " + v.(string) + " -> " + info.ID)
 									} else {
-										println("egress:tmpG.Connect " + info.HumanId() + " -> " + v.(string))
+										println("egress:tmpG.Connect " + info.ID + " -> " + v.(string))
 									}
 									tmpG.Connect(e)
 								}
@@ -644,11 +650,11 @@ func evalSG(info *terraform.InstanceInfo, c *terraform.ResourceConfig, g *dag.Gr
 					println("sjl0.6")
 					SG := strip(sg.(string))
 					if bIngress {
-						println("tmpG.connecting " + SG + " to " + info.HumanId())
-						tmpG.Connect(dag.BasicEdge(SG, info.HumanId()))
+						println("tmpG.connecting " + SG + " to " + info.ID)
+						tmpG.Connect(dag.BasicEdge(SG, info.ID))
 					} else {
-						println("tmpG.connecting " + info.HumanId() + " to " + SG)
-						tmpG.Connect(dag.BasicEdge(info.HumanId(), SG))
+						println("tmpG.connecting " + info.ID + " to " + SG)
+						tmpG.Connect(dag.BasicEdge(info.ID, SG))
 					}
 				}
 			} else {
@@ -659,7 +665,9 @@ func evalSG(info *terraform.InstanceInfo, c *terraform.ResourceConfig, g *dag.Gr
 
 	return nil
 }
-func findCidrMembership(info *terraform.InstanceInfo, c *terraform.ResourceConfig, subnet string, g *dag.Graph, thisGraph *graph) error {
+
+func connectByCidr(info *cytoInstanceInfo, subnet string, g *dag.Graph, thisGraph *graph) error {
+	//Look for any cidr block sg rules that apply this the current instance
 	currentCidr, ok := thisGraph.SubCidrMap[subnet]
 	if !ok {
 		return errors.New("Unexpected error: couldn't match a subnet to its cidr block")
@@ -667,23 +675,6 @@ func findCidrMembership(info *terraform.InstanceInfo, c *terraform.ResourceConfi
 	ip, cCidr, err := net.ParseCIDR(currentCidr)
 	if err != nil {
 		return err
-	}
-	for _, e := range g.UpEdges(currentCidr).List() {
-		if _, cidr, err := net.ParseCIDR(e.(string)); err == nil {
-			for _, v := range thisGraph.CidrEc2Membership[cidr.String()] {
-				//draw edge
-				thisGraph.addEdge(v, info.HumanId())
-			}
-		}
-
-	}
-	for _, e := range g.DownEdges(currentCidr).List() {
-		if _, cidr, err := net.ParseCIDR(e.(string)); err == nil {
-			for _, v := range thisGraph.CidrEc2Membership[cidr.String()] {
-				//draw edge
-				thisGraph.addEdge(info.HumanId(), v)
-			}
-		}
 	}
 	cidrSize1, _ := cCidr.Mask.Size()
 	for _, v := range g.Vertices() {
@@ -695,15 +686,48 @@ func findCidrMembership(info *terraform.InstanceInfo, c *terraform.ResourceConfi
 			//                      since there's a 50% chance that this instance would acquire an IP outside the range of 10.0.0.0/24, like
 			//						10.1.0.10
 			cidrSize2, _ := cidr.Mask.Size()
-			if cidrSize2 >= cidrSize1 {
+			println("cidrSize2: " + strconv.Itoa(cidrSize2) + " cidrSize1: " + strconv.Itoa(cidrSize1))
+			if cidrSize2 <= cidrSize1 { // the larger the mask size, the smaller the CIDR
 				if cidr.Contains(ip) {
 					println("yes")
 					// instance is a member of this CIDR
-					thisGraph.addCidrEc2Membership(cidr.String(), info.HumanId())
+					for _, e := range g.UpEdges(cidr.String()).List() {
+						//we assume the other end must be a security group
+						for _, v := range thisGraph.SgEc2Membership[e.(string)] {
+							//draw edge
+							thisGraph.addEdge(v, info.ID)
+						}
+
+					}
+					for _, e := range g.DownEdges(cidr.String()).List() {
+						for _, v := range thisGraph.SgEc2Membership[e.(string)] {
+							//draw edge
+							thisGraph.addEdge(info.ID, v)
+						}
+					}
 				}
 			}
 		}
 	}
+	return nil
+}
+func connectBySG(info *cytoInstanceInfo, sg string, g *dag.Graph, thisGraph *graph) error {
+	println("searching sg: " + sg)
+	for _, e := range g.UpEdges(sg).List() {
+		println("UpEdges to " + e.(string))
+		for _, v := range thisGraph.SgEc2Membership[e.(string)] {
+			//draw edge
+			thisGraph.addEdge(v, info.ID)
+		}
+	}
+	for _, e := range g.DownEdges(sg).List() {
+		println("Downedges to " + e.(string))
+		for _, v := range thisGraph.SgEc2Membership[e.(string)] {
+			//draw edge
+			thisGraph.addEdge(info.ID, v)
+		}
+	}
+	thisGraph.addSgEc2Membership2(sg, info.ID)
 	return nil
 }
 func interpolateConfig(m *module.Tree, thisGraph *graph) error {
@@ -712,27 +736,34 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 	var g dag.Graph // network pathing graph
 
 	p.DiffFn = func(
-		info *terraform.InstanceInfo,
+		ii *terraform.InstanceInfo,
 		s *terraform.InstanceState,
 		c *terraform.ResourceConfig) (*terraform.InstanceDiff, error) {
 
-		//		diff := new(terraform.InstanceDiff)
-		//		diff.Attributes = make(map[string]*terraform.ResourceAttrDiff)
+		println("TYPE: " + ii.Type + "NAME: " + ii.HumanId() + "MODULEPATH: ")
+		fmt.Println("RAW:")
+		fmt.Println(c.Raw)
+		fmt.Println("CONFIG:")
+		fmt.Println(c.Config)
+		for _, v := range ii.ModulePath {
+			println(v)
+		}
+		info := newInstanceInfo(ii, 0)
 
-		switch info.Type {
+		switch info.II.Type {
 		case "aws_vpc":
-			thisGraph.addNode2(info, c, "")
+			thisGraph.addNode(info, c, "", 0)
 		case "aws_subnet":
-			println("subnet")
 			if p, ok := c.Get("vpc_id"); ok {
 				// add parent
-				if err := thisGraph.addNode2(info, c, p.(string)); err != nil {
+				vpc := strip(p.(string))
+				if err := thisGraph.addNode(info, c, modulePath(ii.ModulePath, vpc), 0); err != nil {
 					return nil, err
 				}
 			}
 			if p, ok := c.Get("cidr_block"); ok {
 				cidr := strip(p.(string))
-				if err := thisGraph.addSubCidrMap(info.HumanId(), cidr); err != nil {
+				if err := thisGraph.addSubCidrMap(info.ID, cidr); err != nil {
 					return nil, err
 				}
 			}
@@ -742,13 +773,13 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			var subnet string // limitation: instance belongs to only one subnet, even though instances can have multiple network interfaces, we only support the primary interface
 			var sgs []string
 			if p, ok := c.Get("subnet_id"); ok {
-				subnet = strip(p.(string))
-				if err := thisGraph.addNode2(info, c, subnet); err != nil {
+				subnet = modulePath(ii.ModulePath, strip(p.(string)))
+				if err := thisGraph.addNode(info, c, subnet, 0); err != nil {
 					return nil, err
 				}
 				if _sgs, ok := c.Get("vpc_security_group_ids"); ok {
 					for _, sg := range _sgs.([]interface{}) {
-						sgs = append(sgs, strip(sg.(string)))
+						sgs = append(sgs, modulePath(ii.ModulePath, strip(sg.(string))))
 					}
 				}
 			} else if p, ok := c.Get("network_interface"); ok {
@@ -758,11 +789,11 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 						if did.(int) == 0 {
 							println("found device index 0")
 							if nid, ok := ni["network_interface_id"]; ok {
-								netID := strip(nid.(string))
-								if err := thisGraph.addNode2(info, c, thisGraph.ParentMap[netID]); err != nil {
+								netID := modulePath(ii.ModulePath, strip(nid.(string)))
+								if err := thisGraph.addNode(info, c, thisGraph.ParentMap[netID], 0); err != nil {
 									return nil, err
 								}
-								if err := thisGraph.addNiEc2Map2(nid.(string), info.HumanId()); err != nil {
+								if err := thisGraph.addNiEc2Map2(netID, info.ID); err != nil {
 									return nil, err
 								}
 								// draw network connections
@@ -774,93 +805,37 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 				}
 			}
 			for _, sg := range sgs {
-				println("searching sg: " + sg)
-				for _, e := range g.UpEdges(sg).List() {
-					println("UpEdges to " + e.(string))
-					for _, v := range thisGraph.SgEc2Membership[e.(string)] {
-						//draw edge
-						thisGraph.addEdge(v, info.HumanId())
-					}
+				if err := connectBySG(info, sg, &g, thisGraph); err != nil {
+					return nil, err
 				}
-				for _, e := range g.DownEdges(sg).List() {
-					println("Downedges to " + e.(string))
-					for _, v := range thisGraph.SgEc2Membership[e.(string)] {
-						//draw edge
-						thisGraph.addEdge(info.HumanId(), v)
-					}
-				}
-				thisGraph.addSgEc2Membership2(sg, info.HumanId())
 			}
 
 			//Look for any cidr block sg rules that apply this the current instance
-			currentCidr, ok := thisGraph.SubCidrMap[subnet]
-			if !ok {
-				return nil, errors.New("Unexpected error: couldn't match a subnet to its cidr block")
-			}
-			ip, cCidr, err := net.ParseCIDR(currentCidr)
-			if err != nil {
+			if err := connectByCidr(info, subnet, &g, thisGraph); err != nil {
 				return nil, err
 			}
-			cidrSize1, _ := cCidr.Mask.Size()
-			for _, v := range g.Vertices() {
-				if _, cidr, err := net.ParseCIDR(v.(string)); err == nil {
-					//found a CIDR
-					println("is " + ip.String() + " in " + cidr.String() + "?")
-					// special case: if this instance belongs to a subnet whos CIDR is *larger* than the SG rule's cidr, then *reject* connection
-					//               e.g. - if subnet CIDR = 10.0.0.0/23, and the SG rule allows ingress from 10.0.0.0/24 then don't draw the edge
-					//                      since there's a 50% chance that this instance would acquire an IP outside the range of 10.0.0.0/24, like
-					//						10.1.0.10
-					cidrSize2, _ := cidr.Mask.Size()
-					println("cidrSize2: " + strconv.Itoa(cidrSize2) + " cidrSize1: " + strconv.Itoa(cidrSize1))
-					if cidrSize2 <= cidrSize1 { // the larger the mask size, the smaller the CIDR
-						if cidr.Contains(ip) {
-							println("yes")
-							// instance is a member of this CIDR
-							for _, e := range g.UpEdges(cidr.String()).List() {
-								//we assume the other end must be a security group
-								for _, v := range thisGraph.SgEc2Membership[e.(string)] {
-									//draw edge
-									thisGraph.addEdge(v, info.HumanId())
-								}
-
-							}
-							for _, e := range g.DownEdges(cidr.String()).List() {
-								for _, v := range thisGraph.SgEc2Membership[e.(string)] {
-									//draw edge
-									thisGraph.addEdge(info.HumanId(), v)
-								}
-							}
-						}
-					}
-				}
-			}
-			thisGraph.addSubEc2Membership(subnet, info.HumanId())
-
-			// COMMENT OUT for now: we shouldn't draw any edges to/from CIDRs, only security group to security group.  Why?
-			//             because CIDRs don't have egress/ingress rules, only SGs do.
-			// also look to see if there are other security groups with CIDR rules allowing connection with this instance based on its ip
-			//if err := findCidrMembership(info, c, subnet, &g, thisGraph); err != nil {
-			//	return diff, err
-			//}
+			thisGraph.addSubEc2Membership(subnet, info.ID)
 
 		case "aws_network_interface":
 			println("network_interface")
 			if p, ok := c.Get("subnet_id"); ok {
-				err := thisGraph.addParent2(info, p.(string))
+				subnet_id := modulePath(ii.ModulePath, strip(p.(string)))
+				err := thisGraph.addParent(info, subnet_id)
 				if err != nil {
 					return nil, err
 				}
-				err = thisGraph.addSubNiMembership2(p.(string), info.HumanId())
+				err = thisGraph.addSubNiMembership2(subnet_id, info.ID)
 				if err != nil {
 					return nil, err
 				}
 			}
 			if sgs, ok := c.Get("security_groups"); ok {
-				for _, sg := range sgs.([]interface{}) {
-					if err := thisGraph.addSgNiMembership2(sg.(string), info.HumanId()); err != nil {
+				for _, _sg := range sgs.([]interface{}) {
+					sg := modulePath(ii.ModulePath, strip(_sg.(string)))
+					if err := thisGraph.addSgNiMembership2(sg, info.ID); err != nil {
 						return nil, err
 					}
-					if err := thisGraph.addNiSgMembership2(info.HumanId(), sg.(string)); err != nil {
+					if err := thisGraph.addNiSgMembership2(info.ID, sg); err != nil {
 						return nil, err
 					}
 				}
@@ -868,16 +843,16 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 		case "aws_security_group":
 			println("sjl0.0")
 
-			g.Add(info.HumanId())
+			g.Add(info.ID)
 
 			//check for any edges pointing to 0.0.0.0/0 then connect them to this security group (SG)
 			for _, e := range g.UpEdges("0.0.0.0/0").List() {
-				println("g1.connecting " + e.(string) + " -> " + info.HumanId())
-				g.Connect(dag.BasicEdge(e.(string), info.HumanId()))
+				println("g1.connecting " + e.(string) + " -> " + info.ID)
+				g.Connect(dag.BasicEdge(e.(string), info.ID))
 			}
 			for _, e := range g.DownEdges("0.0.0.0/0").List() {
-				println("g2.connecting " + info.HumanId() + " -> " + e.(string))
-				g.Connect(dag.BasicEdge(info.HumanId(), e.(string)))
+				println("g2.connecting " + info.ID + " -> " + e.(string))
+				g.Connect(dag.BasicEdge(info.ID, e.(string)))
 			}
 			var tmpG dag.Graph
 			if err := evalSG(info, c, &g, true, &tmpG); err != nil {
@@ -886,16 +861,16 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			if err := evalSG(info, c, &g, false, &tmpG); err != nil {
 				return nil, err
 			}
-			// at this point (A) g.DownEdges(info.HumanId()) should match with (B) tmpG.DownEdges(info.HumanId())
+			// at this point (A) g.DownEdges(info.ID) should match with (B) tmpG.DownEdges(info.ID)
 			// any differences in A should be pruned such that A is subset of B
 
 			println("sjl1")
 			for _, e := range tmpG.Edges() {
 				println("check1: " + e.Source().(string) + " -> " + e.Target().(string))
 			}
-			A := g.DownEdges(info.HumanId())
+			A := g.DownEdges(info.ID)
 			println("sjl2")
-			B := tmpG.DownEdges(info.HumanId())
+			B := tmpG.DownEdges(info.ID)
 			println("sjl3")
 			PruneSet := A.Difference(B)
 			for _, e := range tmpG.Edges() {
@@ -903,16 +878,16 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			}
 			println("sjl4")
 			for _, p := range PruneSet.List() {
-				println("pruning " + info.HumanId() + " -> " + p.(string))
-				g.RemoveEdge(dag.BasicEdge(info.HumanId(), p.(string)))
+				println("pruning " + info.ID + " -> " + p.(string))
+				g.RemoveEdge(dag.BasicEdge(info.ID, p.(string)))
 			}
 			for _, e := range tmpG.Edges() {
 				println("check3: " + e.Source().(string) + " -> " + e.Target().(string))
 			}
 			println("sjl1")
-			A = g.UpEdges(info.HumanId())
+			A = g.UpEdges(info.ID)
 			println("sjl2")
-			B = tmpG.UpEdges(info.HumanId())
+			B = tmpG.UpEdges(info.ID)
 			println("sjl3")
 			for _, e := range tmpG.Edges() {
 				println("check4: " + e.Source().(string) + " -> " + e.Target().(string))
@@ -923,8 +898,8 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 			}
 			println("sjl4")
 			for _, p := range PruneSet.List() {
-				println("pruning " + p.(string) + " -> " + info.HumanId())
-				g.RemoveEdge(dag.BasicEdge(p.(string), info.HumanId()))
+				println("pruning " + p.(string) + " -> " + info.ID)
+				g.RemoveEdge(dag.BasicEdge(p.(string), info.ID))
 			}
 			println("sjl6")
 			// add the new edges to the main graph
@@ -933,51 +908,52 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 				g.Connect(e)
 			}
 			println("sjl8")
+
+		case "aws_elb":
+			// elb can belong to multiple subnets, so that means it can have multiple "parents".  cytoscape doesn't support multiple parents,
+			// so we will need clone the elb into multiple versions of itself, one for each subnet it belongs to.
+			if p, ok := c.Get("subnets"); ok {
+				for i, _sub := range p.([]interface{}) {
+					sub := modulePath(ii.ModulePath, strip(_sub.(string)))
+					clonedInfo := newInstanceInfo(ii, i)
+					if err := thisGraph.addNode(clonedInfo, c, sub, i); err != nil {
+						return nil, err
+					}
+
+					// process security group to security group connections
+					if _sgs, ok := c.Get("security_groups"); ok {
+						for _, _sg := range _sgs.([]interface{}) {
+							sg := modulePath(ii.ModulePath, strip(_sg.(string)))
+							if err := connectBySG(clonedInfo, sg, &g, thisGraph); err != nil {
+								return nil, err
+							}
+
+						}
+					}
+					//Look for any cidr block sg rules that apply this the current instance
+					if err := connectByCidr(clonedInfo, sub, &g, thisGraph); err != nil {
+						return nil, err
+					}
+					thisGraph.addSubEc2Membership(sub, clonedInfo.ID)
+				}
+			}
+
 		}
 
-		//		for k, v := range c.Raw {
-		//
-		//			if k == "nil" {
-		//				return nil, nil
-		//			}
-		//
-		//			// If this key is not computed, then look it up in the
-		//			// cleaned config.
-		//			found := false
-		//			for _, ck := range c.ComputedKeys {
-		//				if ck == k {
-		//					found = true
-		//					break
-		//				}
-		//			}
-		//			if !found {
-		//				v = c.Config[k]
-		//			}
-
-		//			for k, attrDiff := range testFlatAttrDiffs(k, v) {
-		//
-		//				diff.Attributes[k] = attrDiff
-		//			}
-		//
-		//		}
 		println("sgGrph=" + g.String())
-
-		//		if !diff.Empty() {
-		//			diff.Attributes["type"] = &terraform.ResourceAttrDiff{
-		//				Old: "",
-		//				New: info.Type,
-		//			}
-		//		}
 
 		// Add computed fields from the actual aws provider
 
-		p := aws.Provider()
-		diff, err := p.Diff(info, s, c)
-		if err != nil {
-			return nil, err
+		if strings.HasPrefix(info.II.Type, "aws_") {
+			p := aws.Provider()
+			diff, err := p.Diff(ii, s, c)
+			if err != nil {
+				return nil, err
+			}
+			return diff, nil
 		}
 
-		return diff, nil
+		return nil, nil
 	}
 
 	input := new(terraform.MockUIInput)
@@ -985,7 +961,9 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 		Module: m,
 		ProviderResolver: terraform.ResourceProviderResolverFixed(
 			map[string]terraform.ResourceProviderFactory{
-				"aws": terraform.ResourceProviderFactoryFixed(p),
+				"aws":    terraform.ResourceProviderFactoryFixed(p),
+				"null":   terraform.ResourceProviderFactoryFixed(p),
+				"google": terraform.ResourceProviderFactoryFixed(p),
 			},
 		),
 		Parallelism: 1,
@@ -1001,31 +979,12 @@ func interpolateConfig(m *module.Tree, thisGraph *graph) error {
 	if err := ctx.Input(terraform.InputModeVar | terraform.InputModeVarUnset); err != nil {
 		return err
 	}
-	logging.SetOutput() // suppress verbose logging that shows up in Developer Tool console screen
+	//	logging.SetOutput() // suppress verbose logging that shows up in Developer Tool console screen
 
 	if _, err := ctx.Plan(); err != nil {
 		return err
 	}
 
-	/*
-		inter := ctx.Interpolater()
-		inter.Operation = 6 //terraform.walkValidate
-
-		scope := &terraform.InterpolationScope{
-			Path: []string{"root"},
-		}
-
-		for _, rez := range m.Config().Resources {
-
-			if err := interpolateRawConfig(inter, scope, rez.RawConfig); err != nil {
-				return err
-			}
-			if err := interpolateRawConfig(inter, scope, rez.RawCount); err != nil {
-				return err
-			}
-
-		}
-	*/
 	return nil
 }
 func configToCytoscape(configuration *config.Config) (string, error) {
@@ -1052,378 +1011,6 @@ func moduleToCytoscape(mod *module.Tree) (string, error) {
 	return string(byteArray), nil
 }
 
-/*
-func moduleToCytoscape(mod *module.Tree) (string, error) {
-
-	var err error
-	println("calling interpolateConfig")
-	if err := interpolateConfig(mod); err != nil {
-		println("interpolateConfig ERROR:" + err.Error())
-		return "", err
-	}
-	println("out of interpolateConfig")
-	thisGraph := newGraph()
-
-	println("Pass 1")
-	// PASS 1: populate the parent map, that is, given a resource id, store the parent resource id
-	for _, resource := range mod.Config().Resources {
-		cfg := resource.RawConfig.Config()
-		switch resource.Type {
-		case "aws_vpc":
-			thisGraph.addNode(resource, "vpc", "")
-		case "aws_subnet":
-			if p, ok := cfg["vpc_id"]; ok {
-				// add parent
-				err := thisGraph.addParent(resource, p.(string))
-				if err != nil {
-					return "", err
-				}
-			}
-		case "aws_network_interface":
-			if p, ok := cfg["subnet_id"]; ok {
-				// add parent
-				err := thisGraph.addParent(resource, p.(string))
-				if err != nil {
-					return "", err
-				}
-				err = thisGraph.addSubNiMembership(resource, p.(string), resource.Id())
-				if err != nil {
-					return "", err
-				}
-			}
-			if sgs, ok := cfg["security_groups"]; ok {
-				for _, sg := range sgs.([]interface{}) {
-					err = thisGraph.addSgNiMembership(resource, sg.(string), resource.Id())
-					if err != nil {
-						return "", err
-					}
-					err = thisGraph.addNiSgMembership(resource, resource.Id(), sg.(string))
-					if err != nil {
-						return "", err
-					}
-
-				}
-			}
-		case "aws_instance":
-			if p, ok := cfg["subnet_id"]; ok {
-				err := thisGraph.addParent(resource, p.(string))
-				if err != nil {
-					return "", err
-				}
-				// This instance isn't using `network_interface` argument, yet we still need something to identify its
-				// primary network interface, so we will use its instance ID
-				err = thisGraph.addNiEc2Map(resource, resource.Id(), resource.Id())
-				if err != nil {
-					return "", err
-				}
-				err = thisGraph.addSubNiMembership(resource, p.(string), resource.Id())
-				if err != nil {
-					return "", err
-				}
-
-				//niEc2Map[resource.Id()] = resource.Id()
-				//subNiMembership[subnetID] = append(subNiMembership[subnetID], resource.Id())
-				if sgs, ok := cfg["vpc_security_group_ids"]; ok {
-					for _, sg := range sgs.([]interface{}) {
-						err := thisGraph.addSgEc2Membership(resource, sg.(string), resource.Id())
-						if err != nil {
-							return "", err
-						}
-
-					}
-				}
-			} else if p, ok := cfg["network_interface"]; ok {
-				println("network_interface")
-				for _, ni := range p.([]map[string]interface{}) {
-					println("found one")
-					if did, ok := ni["device_index"]; ok {
-						println("found device index")
-						//limitation: Support only the primary network interface for now
-						if did.(int) == 0 {
-							println("found device index 0")
-							if nid, ok := ni["network_interface_id"]; ok {
-
-								err := thisGraph.addNiEc2Map(resource, nid.(string), resource.Id())
-								if err != nil {
-									return "", err
-								}
-								//// add parent
-								//netID, err := stripInterpolateSyntax(resource, nid.(string))
-								//if err != nil {
-								//	return "", err
-								//}
-								//println("nid: %s => ec2: %s", netID, resource.Id())
-								//niEc2Map[netID] = resource.Id()
-							}
-						}
-					}
-				}
-				println("exit network_interface")
-			}
-		case "aws_security_group":
-			println("enter aws_security_group: %s", resource.Id()+".0")
-			// For this security group (sg) enumerate all the ingress CIDR networks
-			if ingressRules, ok := cfg["ingress"].([]map[string]interface{}); ok {
-				for _, ingress := range ingressRules {
-					println("sg 1")
-
-					if cidrList, ok := ingress["cidr_blocks"].([]interface{}); ok {
-						for _, cidr := range cidrList {
-							println("sg 2 %s", cidr.(string))
-							_, n, err := net.ParseCIDR(cidr.(string))
-							if err == nil {
-								err := thisGraph.addSgIngressCidrs(resource, resource.Id(), n)
-								if err != nil {
-									return "", err
-								}
-								//sgIngressCidrs[resource.Id()] = append(sgIngressCidrs[resource.Id()], n)
-							}
-						}
-					} else if sgList, ok := ingress["security_groups"].([]interface{}); ok {
-						for _, sg := range sgList {
-							err := thisGraph.addSgIngSgs(resource, resource.Id(), sg.(string))
-							if err != nil {
-								return "", err
-							}
-							//sgID, err := stripInterpolateSyntax(resource, sg.(string))
-							//if err != nil {
-							//	return "", err
-							//}
-							//println("sg 2.1 %s", sgID)
-							//sgIngressSg[resource.Id()] = append(sgIngressSg[resource.Id()], sgID)
-						}
-					} else {
-						return "", errors.New("security group egress rule must have either cidr or security group")
-					}
-				}
-			}
-			// For this security group (sg) enumerate all the egress CIDR networks
-			if egressRules, ok := cfg["egress"].([]map[string]interface{}); ok {
-				for _, egress := range egressRules {
-					println("sg 3")
-					if cidrList, ok := egress["cidr_blocks"].([]interface{}); ok {
-						for _, cidr := range cidrList {
-							println("sg 4 %s", cidr.(string))
-							_, n, err := net.ParseCIDR(cidr.(string))
-							if err == nil {
-								err := thisGraph.addSgEgrCidrs(resource, resource.Id(), n)
-								if err != nil {
-									return "", err
-								}
-								//sgEgressCidrs[resource.Id()] = append(sgEgressCidrs[resource.Id()], n)
-							}
-						}
-					} else if sgList, ok := egress["security_groups"].([]interface{}); ok {
-						for _, sg := range sgList {
-							err := thisGraph.addSgIngSgs(resource, resource.Id(), sg.(string))
-							if err != nil {
-								return "", err
-							}
-							//sgID, err := stripInterpolateSyntax(resource, sg.(string))
-							//if err != nil {
-							//	return "", err
-							//}
-							//println("sg 4 %s", sgID)
-							//if err == nil {
-							//	sgEgressSg[resource.Id()] = append(sgEgressSg[resource.Id()], sgID)
-							//}
-						}
-					} else {
-						return "", errors.New("security group egress rule must have either cidr or security group")
-					}
-				}
-			}
-
-			println("exit aws_security_group")
-
-		}
-	}
-
-	//	cidrSubnetMembership := make(map[*net.IPNet][]string)
-	//	subnets := make(map[string]*net.IPNet)
-	println("Pass 2")
-	for _, resource := range mod.Config().Resources {
-		cfg := resource.RawConfig.Config()
-		//		var cn *cytoscapeNode
-		switch resource.Type {
-		//			cn = &cytoscapeNode{
-		//				Data: cytoscapeNodeBody{
-		//					ID:       resource.Id(),
-		//					Name:     resource.Name,
-		//					NodeType: "vpc",
-		//					LocalID:  "",
-		//				},
-		//			}
-		case "aws_subnet":
-			count, err := resource.Count()
-			if err != nil {
-				return "", err
-			}
-
-			for i := 0; i < count; i++ {
-				index := strconv.Itoa(i)
-				//println("aws_subnet: " + resource.Id() + " count:" + index)
-				if parent, ok := thisGraph.ParentMap[resource.Id()+"."+index]; ok {
-					thisGraph.addNode(resource, "subnet", parent)
-					//				cn = &cytoscapeNode{
-					//					Data: cytoscapeNodeBody{
-					//						ID:       resource.Id(),
-					//						Name:     resource.Name,
-					//						NodeType: "subnet",
-					//						LocalID:  "",
-					//						Parent:   parent,
-					//					},
-					//				}
-				}
-			}
-			if c, ok := cfg["cidr_block"]; ok {
-				_, ipnet, err := net.ParseCIDR(c.(string))
-				if err == nil {
-
-					for _, cidrs := range thisGraph.SgIngressCidrs {
-						for _, cidr := range cidrs {
-							if cidr.Contains(ipnet.IP) || ipnet.Contains(cidr.IP) {
-								err := thisGraph.addCidrSubnetMembership(resource, cidr, resource.Id()+".0")
-								if err != nil {
-									return "", err
-								}
-								//cidrSubnetMembership[cidr] = append(cidrSubnetMembership[cidr], resource.Id())
-							}
-						}
-					}
-				}
-			}
-		case "aws_instance":
-			println("aws_instance")
-			if p, ok := cfg["network_interface"]; ok {
-				println("network_interface: " + resource.Id())
-				for _, ni := range p.([]map[string]interface{}) {
-					println("found network_interface")
-					if did, ok := ni["device_index"]; ok {
-						//limitation: Support only the primary network interface for now
-						if did.(int) == 0 {
-							println("primary interface")
-							if nid, ok := ni["network_interface_id"]; ok {
-								netID, _ := stripInterpolateSyntax(resource, nid.(string))
-								println("nid of primary: " + netID)
-								println("sub of primary=" + thisGraph.ParentMap[netID+".0"])
-								err := thisGraph.addParent(resource, thisGraph.ParentMap[netID+".0"])
-								if err != nil {
-									return "", err
-								}
-								//parentMap[resource.Id()] = parentMap[netID]
-								// add security group membership
-								if sgs, ok := thisGraph.NiSgMembership[netID+".0"]; ok {
-									for _, sg := range sgs {
-										println("sg: %s => ec2: %s", sg, resource.Id()+".0")
-										err := thisGraph.addSgEc2Membership(resource, sg, resource.Id())
-										if err != nil {
-											return "", err
-										}
-										//sgEc2Membership[sg] = append(sgEc2Membership[sg], resource.Id())
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-			if parent, ok := thisGraph.ParentMap[resource.Id()+".0"]; ok {
-				thisGraph.addNode(resource, "ec2", parent)
-				//			cn = &cytoscapeNode{
-				//				Data: cytoscapeNodeBody{
-				//					ID:       resource.Id(),
-				//					Name:     resource.Name,
-				//					NodeType: "ec2",
-				//					LocalID:  "",
-				//					Parent:   parent,
-				//				},
-				//			}
-			}
-			println("exit aws_instance")
-		case "aws_security_group":
-			println("enter aws_security_group")
-			// TODO: build edges
-
-			println("exit aws_security_group")
-		}
-
-	}
-	println("Pass 3")
-	// Pass 3 is about building the edges between the nodes
-	for _, resource := range mod.Config().Resources {
-
-		//var cn *cytoscapeNode
-		switch resource.Type {
-
-		case "aws_security_group":
-			println("enter aws_security_group: %s", resource.Id())
-			for _, cidr := range thisGraph.SgIngressCidrs[resource.Id()+".0"] {
-				println("cidr: %s", cidr.String())
-				for _, sub := range thisGraph.CidrSubnetMembership[cidr] {
-					println("sub: %s", sub)
-					for _, ni := range thisGraph.SubNIMembership[sub] {
-						println("ni: %s", ni)
-						for _, ec2 := range thisGraph.SgEc2Membership[resource.Id()+".0"] {
-							println("ec2: %s", ec2)
-							println("santity: %s", thisGraph.NiEc2Map["aws_network_interface.web"])
-							println("santity2: %s", thisGraph.NiEc2Map[ni])
-							if thisGraph.NiEc2Map[ni] != "" && thisGraph.NiEc2Map[ni] != ec2 {
-								println("adding edge source: %s target: %s", thisGraph.NiEc2Map[ni], ec2)
-								thisGraph.addEdge(thisGraph.NiEc2Map[ni], ec2)
-								//	cn = &cytoscapeNode{
-								//		Data: cytoscapeNodeBody{
-								//			NodeType: "edge",
-								//			Source:   thisGraph.NiEc2Map[ni],
-								//			Target:   ec2,
-								//		},
-								//	}
-								//	if cn != nil {
-								//		cytoscapeData = append(cytoscapeData, *cn)
-								//	}
-
-							}
-						}
-					}
-				}
-			}
-			for _, sg := range thisGraph.SgIngressSgs[resource.Id()+".0"] {
-				println("sg: %s", sg)
-				for _, ec2Source := range thisGraph.SgEc2Membership[sg] {
-					println("ec2Source: %s", ec2Source)
-					for _, ec2Target := range thisGraph.SgEc2Membership[resource.Id()+".0"] {
-						println("ec2Target: %s", ec2Target)
-						if ec2Source != ec2Target {
-							println("adding edge source: %s target: %s", ec2Source, ec2Target)
-							thisGraph.addEdge(ec2Source, ec2Target)
-							//cn = &cytoscapeNode{
-							//	Data: cytoscapeNodeBody{
-							//		NodeType: "edge",
-							//		Source:   ec2Source,
-							//		Target:   ec2Target,
-							//	},
-							//}
-							//if cn != nil {
-							//	cytoscapeData = append(cytoscapeData, *cn)
-							//}
-
-						}
-					}
-				}
-			}
-			println("exit aws_security_group")
-		}
-
-	}
-	l := strconv.Itoa(len(*thisGraph.CytoscapeData))
-	println("length of cytodata=" + l)
-	byteArray, err := json.Marshal(*thisGraph.CytoscapeData)
-	if err != nil {
-		return "", err
-	}
-	return string(byteArray), nil
-}
-*/
 func tempDir(d string) (string, error) {
 
 	dir, err := ioutil.TempDir(d, "tf")

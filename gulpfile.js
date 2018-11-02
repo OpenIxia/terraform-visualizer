@@ -79,11 +79,12 @@ gulp.task('generate-closure-container', ['generate-transpiled.js'], (done) => {
     });
 });
 
-gulp.task('generate-hcl-hil.js', ['create-output-directory'], (done) => {
+gulp.task('generate-hcl-hil.js', ['create-output-directory', 'generate-transpiled.js'], (done) => {
 
     gulp.src('hcl-hil/transpiled.js')
         .pipe(rename('hcl-hil.js'))
         .pipe(gulp.dest('out/src'))
+    done();
 
 });
 

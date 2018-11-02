@@ -254,7 +254,7 @@ export default class TerraformVisualizerPanel extends PreviewDocumentContentProv
                                                            $.getJSON("${this._localSourceUri}/.tv/data.json"),
                                                            $.getJSON("${this._localSourceUri}/style.json")
                                                        ).done(function(datafile, stylefile) {
-                                                           var sFile = JSON.parse(JSON.stringify(stylefile[0]).replace("\${localSourceUri}", "${this._localSourceUri}"))
+                                                           var sFile = JSON.parse(JSON.stringify(stylefile[0]).replace(/\\\${localSourceUri}/g, "${this._localSourceUri}"))
                                                            NProgress.set(0.5);
 
                                                            loadCytoscape({
